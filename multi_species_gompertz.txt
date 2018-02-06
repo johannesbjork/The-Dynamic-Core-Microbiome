@@ -1,0 +1,278 @@
+multi_species_gompertz <- "
+  model {
+
+  ### Multi-species Gompertz model ###
+
+    # Standardization and centering of covariates
+    
+    mTemp <- mean( temp[] )
+    sdTemp <- sd( temp[] )
+    mSal <- mean( sal[] )
+    sdSal <- sd( sal[] )
+    mChl <- mean( chl[] )
+    sdChl <- sd( chl[] )
+    mBact <- mean( bact[] )
+    sdBact <- sd( bact[] )
+    mPO4 <- mean( PO4[] )
+    sdPO4 <- sd( PO4[] )
+    mNH4 <- mean( NH4[] )
+    sdNH4 <- sd( NH4[] )
+    mNO2 <- mean( NO2[] )
+    sdNO2 <- sd( NO2[] )
+
+    muN[1] <- 0
+    for( t in 2:NMonths ) {
+      for ( i in 1:NSpecies ) {
+
+        # Stochastic component
+        mu[t,i] ~ dnorm( mu.star[t,i], tau[i] )
+        y[t,i] ~ dpois( lambda[t,i] )
+
+        # Linear predictor
+        log( lambda[t,i] ) <- mu[t,i] + log( N[t] ) + muN[t]
+
+        mu.star[t,i] <- mu[t-1, i] + r[i] * ( 1 - inprod( alpha[i, ], mu[t-1, ] ) / k[i] ) +
+
+        # Covariates standardized to unit variance
+        monthCov[i, months[t]] + 
+        tempCov[i]*((temp[t]-mTemp)/sdTemp) + 
+        salCov[i]*((sal[t]-mSal)/sdSal) + 
+        chlCov[i]*((chl[t]-mChl)/sdChl) + 
+        bactCov[i]*((bact[t]-mBact)/sdBact) + 
+        PO4Cov[i]*((PO4[t]-mPO4)/sdPO4) + 
+        NH4Cov[i]*((NH4[t]-mNH4)/sdNH4) + 
+        NO2Cov[i]*((NO2[t]-mNO2)/sdNO2) +
+
+        # LVs
+        inprod(LV[t,], Loading[i,])
+      
+      }
+      muN[t] ~ dnorm(0,0.01)
+    }
+
+    # Priors LVs
+
+    for( t in 1:NMonths ) {
+		  for( l in 1:NLatent ) {
+			  LV[t,l] ~ dnorm(0,1)  #LVs
+		  }
+	  }
+
+    for( i in 1:NSpecies ) {
+      for( l in 1:NLatent ) {
+        Loading[i,l] ~ dnorm(0,1)   #Loadings
+    	  lamSp[i,l] <- Loading[i,l] * sd(LV[,l])
+      }
+    }
+
+    # Covariance & correlation matrices
+
+    for( i in 1:NSpecies ) {
+      for( j in 1:NSpecies ) {
+        Cov[i,j] <- inprod( lamSp[i,], lamSp[j,] )
+        Corr[i,j] <- Cov[i,j] / sqrt( ( Cov[i,i]+1 / tau[i] ) * ( Cov[j,j]+1 / tau[j] ) )   		  
+ 		  }
+    }
+
+    for( i in 1:NSpecies ) {
+
+      # Stationary variance of mu for variance partitioning calculations
+
+      mu.sd[i] <- sd( mu[,i] )
+      svar[i] <- mu.sd[i] * mu.sd[i]
+
+      # Interaction coefficient, alpha and the indicator variable g.alpha
+
+      alpha[i,i] <- 1                             
+      g.alpha[i,i] <- 1
+      alpha.square[i,i] <- 1
+
+      for( j in (i + 1):NSpecies ) {
+        
+        # Used to calculate total variance for each species
+
+        # Gibbs variable selection (GVS)
+
+        alpha.tmp[i,j] ~ dnorm( 0, alpha.tau[i,j] )
+        alpha.tmp[j,i] ~ dnorm( 0, alpha.tau[j,i] )
+
+        alpha[i,j] <- alpha.tmp[i,j] * g.alpha[i,j]
+        alpha[j,i] <- alpha.tmp[j,i] * g.alpha[j,i]
+
+        alpha.square[i,j] <- pow( alpha[i,j], 2 )
+        alpha.square[j,i] <- pow( alpha[j,i], 2 )
+
+        g.alpha[i,j] ~ dbern( 0.1 )
+        g.alpha[j,i] ~ dbern( 0.1 )
+
+        alpha.tau[i,j] <- 1/alpha.var[i,j]
+        alpha.tau[j,i] <- 1/alpha.var[j,i]
+
+        alpha.var[i,j] <- (1 - g.alpha[i,j]) * 1 + g.alpha[i,j] * 1
+        alpha.var[j,i] <- (1 - g.alpha[j,i]) * 1 + g.alpha[j,i] * 1
+
+      }
+    }
+
+    # Variance components
+
+    for( i in 1:NSpecies ) {
+
+    # Variance for each covariate 
+
+      bactVar[i] <- bactCov[i] * bactCov[i]
+      tempVar[i] <- tempCov[i] * tempCov[i]
+      salVar[i] <- salCov[i] * salCov[i]
+      chlVar[i] <- chlCov[i] * chlCov[i]
+      NH4Var[i] <- NH4Cov[i] * NH4Cov[i]
+      NO2Var[i] <- NO2Cov[i] * NO2Cov[i]
+      PO4Var[i] <- PO4Cov[i] * PO4Cov[i]
+ 
+     # Unexplained variance for each species == Environmental forcing
+       
+       n.sigma2[i] <- Cov[i,i]
+ 
+     # Variance explained by the environmental covariates
+       
+      coVar[i] <- NO2Var[i] + NH4Var[i] + PO4Var[i] + tempVar[i] + salVar[i] + chlVar[i] + bactVar[i]
+ 
+      # Total variance for every species
+  
+      totVar[i] <- pow( ( r[i] / k[i]), 2 ) * inprod(alpha.square[i,], svar[]) + n.sigma2[i] + coVar[i]
+  
+      # Intra/inter-spec. interactions and env. stochasticity
+  
+      env[i] <- n.sigma2[i] + coVar[i]
+      inter[i] <- totInter[i] - intra[i]
+      totInter[i] <- pow( ( r[i] / k[i] ), 2 ) * inprod( alpha.square[i,], svar[] )  # Same as totVar except the additional variance terms
+      intra[i] <- pow( ( r[i] / k[i] ), 2 ) * svar[i]  # the formula should include alpha.square[i,i] == 1 but since it zero we skip it in the calc
+
+     # Proportions of total variance explained 
+ 
+      varIntra[i] <- intra[i] / totVar[i]
+      varInter[i] <- inter[i] / totVar[i]
+      varEnv[i] <- n.sigma2[i] / totVar[i]
+      varCov[i] <- coVar[i] / totVar[i]
+      varEC[i] <- env[i] / totVar[i]
+ 
+     # Prop of env. variance explained by the covariates
+ 
+      bactVarEnv[i] <- bactVar[i] /  env[i]
+      tempVarEnv[i] <- tempVar[i] /  env[i]
+      salVarEnv[i] <-  salVar[i] /  env[i]
+      chlVarEnv[i] <-  chlVar[i] /  env[i]
+      NH4VarEnv[i] <-  NH4Var[i] /  env[i]
+      NO2VarEnv[i] <-  NO2Var[i] /  env[i]
+      PO4VarEnv[i] <-  PO4Var[i] /  env[i]
+      propVarEnv[i] <- coVar[i] /  env[i]
+ 
+      bactProp[i] <- bactVar[i] / coVar[i]
+      tempProp[i] <- tempVar[i] / coVar[i]
+      salProp[i] <-  salVar[i] / coVar[i]
+      chlProp[i] <-  chlVar[i] / coVar[i]
+      NH4Prop[i] <-  NH4Var[i] / coVar[i]
+      NO2Prop[i] <-  NO2Var[i] / coVar[i]
+      PO4Prop[i] <-  PO4Var[i] / coVar[i]
+
+    }
+
+    # Set the parameter model (priors) for stoachistic nodes
+
+    for( i in 1:NSpecies ) {
+
+      y[1,i] ~ dpois( lambda[1,i] )
+      mu[1,i] ~ dnorm( 0, 0.001 )
+      log( lambda[1,i] ) <- mu[1, i] + log( N[1] ) + muN[1]
+
+    # Prior for k on log scale. Large variance = Small precision
+      k[i] ~ dexp( 1 )
+      r[i] ~ dnorm( 0, 0.1 )
+
+    # Correlation matrix & std deviation
+      tau[i] <- pow( sd.corr[i], -2 )
+      sd.corr[i] ~ dunif( 0, 1000 )
+    }
+
+    # Priors for covariates
+
+    for( i in 1:NSpecies ) {
+      for( m in 1:12 ) {
+        monthCov[i, m] ~ dnorm( 0, monthCov.tau )
+      }
+    }
+    monthCov.tau <- pow( monthCov.sigma, -2 )
+    monthCov.sigma ~ dunif( 0, 100 )
+
+    for( i in 1:NSpecies ) {
+      tempCov[i] ~ dnorm( 0, tempCov.tau )
+      salCov[i] ~ dnorm( 0, salCov.tau )
+      chlCov[i] ~ dnorm( 0, chlCov.tau )
+      bactCov[i] ~ dnorm( 0, bactCov.tau )
+      PO4Cov[i] ~ dnorm( 0, PO4Cov.tau )
+      NH4Cov[i] ~ dnorm( 0, NH4Cov.tau )
+      NO2Cov[i] ~ dnorm( 0, NO2Cov.tau )
+    }
+     
+    tempCov.tau <- pow( tempCov.sigma, -2 )
+    tempCov.sigma ~ dunif( 0, 100 )
+ 
+    salCov.tau <- pow( salCov.sigma, -2 )
+    salCov.sigma ~ dunif( 0, 100 )
+
+    chlCov.tau <- pow( chlCov.sigma, -2 )
+    chlCov.sigma ~ dunif( 0, 100 )
+
+    bactCov.tau <- pow( bactCov.sigma, -2 )
+    bactCov.sigma ~ dunif( 0, 100 )
+
+    PO4Cov.tau <- pow( PO4Cov.sigma, -2 )
+    PO4Cov.sigma ~ dunif( 0, 100 )
+
+    NH4Cov.tau <- pow( NH4Cov.sigma, -2 )
+    NH4Cov.sigma ~ dunif( 0, 100 )
+ 
+    NO2Cov.tau <- pow( NO2Cov.sigma, -2 )
+    NO2Cov.sigma ~ dunif( 0, 10 )
+
+  # Assign a distribution to the covariates (or other vectors) to handle NAs
+  
+    for( t in 1:NMonths ) {
+      temp[t] ~ dnorm( mu.temp, tau.temp )
+      sal[t] ~ dnorm( mu.sal, tau.sal )
+      bact[t] ~ dnorm( mu.bact, tau.bact )
+      chl[t] ~ dnorm( mu.chl, tau.chl )
+      PO4[t] ~ dnorm( mu.PO4, tau.PO4 )
+      NH4[t] ~ dnorm( mu.NH4, tau.NH4 )
+      NO2[t] ~ dnorm( mu.NO2, tau.NO2 ) 
+    }
+  
+    mu.temp ~ dnorm( 0, 0.0001 )
+    tau.temp <- pow( sigma.temp, -2 )
+    sigma.temp ~ dunif( 0, 100 )
+ 
+    mu.sal ~ dnorm( 0, 0.0001 )
+    tau.sal <- pow( sigma.sal, -2 )
+    sigma.sal ~ dunif( 0, 100 )
+ 
+    mu.bact ~ dnorm( 0, 0.0001 )
+    tau.bact <- pow( sigma.bact, -2 )
+    sigma.bact ~ dunif( 0, 100 )
+     
+    mu.chl ~ dnorm( 0, 0.0001 )
+    tau.chl <- pow( sigma.chl, -2 )
+    sigma.chl ~ dunif( 0, 100 )
+
+    mu.PO4 ~ dnorm( 0, 0.0001 )
+    tau.PO4 <- pow( sigma.PO4, -2 )
+    sigma.PO4 ~ dunif( 0, 100 )
+
+    mu.NH4 ~ dnorm( 0, 0.0001 )
+    tau.NH4 <- pow( sigma.NH4, -2 )
+    sigma.NH4 ~ dunif( 0, 100 )
+
+    mu.NO2 ~ dnorm( 0, 0.0001 )
+    tau.NO2 <- pow( sigma.NO2, -2 )
+    sigma.NO2 ~ dunif( 0, 100 )
+
+  }  
+"
